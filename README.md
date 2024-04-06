@@ -1,5 +1,5 @@
 ## stuff-plus
-#### Version 0.1
+#### Version 0.1 (stuff_plus.R)
 - Limited to 4S fastballs, data from 2017-2023.
 - Outcome: delta_run_exp, which is the change in run expectancy after the pitch. This is fine for starting the model, but really is too context-dependent (i.e. depends on base-out states).
 - Features: velocity, spin rate, balls, strikes, batter stand, pitcher handedness, vertical movement, horizontal movement, 
