@@ -4,7 +4,7 @@ require(tidyverse)
 require(dplyr)
 require(DBI)
 require(RPostgres)
-require(Rtools)
+#require(Rtools)
 require(drat)
 require(xgboost)
 
@@ -63,9 +63,9 @@ raw_ff <- tbl(pitching_db, 'statcast') %>%
   # Select only desired pitch type
   filter(pitch_type == "FF") %>%
   # Drop weird observations where both a swing and a walk are recorded simultaneously
-  mutate(walkflag = ifelse(grepl("walks", des), 1, 0)) %>%
-  filter(walkflag == 0) %>%
-  select(-walkflag) %>%
+  #mutate(walkflag = ifelse(grepl("walks", des), 1, 0)) %>%
+  #filter(walkflag == 0) %>%
+  #select(-walkflag) %>%
   # Drop unnecessary variables to reduce table size 
   select(-fielder_2, -fielder_2_1, -fielder_3, -fielder_4, -fielder_5, 
          -fielder_6, -fielder_7, -fielder_8, -fielder_9, -spin_rate_deprecated,
@@ -106,14 +106,20 @@ raw_ff <- tbl(pitching_db, 'statcast') %>%
          groundball = ifelse(bb_type == "ground_ball", 1, 0),
          flyball = ifelse(bb_type %in% c("fly_ball", "line_drive", "popup"), 1, 0))
 
-# Select only the numeric vectors required for model:train on 2023 data only
+# Select only the numeric vectors required for model:
+# Train on 2022 data, test on 2023 data
+ff_swing2022 <- raw_ff %>% 
+  filter(game_year == 2022) %>%
+  select(swing, all_of(features)) %>%
+  collect()
+
 ff_swing2023 <- raw_ff %>% 
   filter(game_year == 2023) %>%
   select(swing, all_of(features)) %>%
   collect()
 
 clean_ff <- raw_ff %>% 
-  select(pitcher, swing, all_of(features))
+  select(pitcher, swing, all_of(features)) %>%
   collect()
 
 rm(pitchers_batting, batters_pitching)
@@ -131,13 +137,9 @@ subsample_choice <- 1.0
 colsample_choice <- 0.6
 
 #### Swing Model ####
-# Create training data size
-trainSize <- round(0.80*nrow(ff_swing2023))
-
 # Create train and test datasets (randomly select rows from cleaned data)
-trainIndex <- sample(nrow(ff_swing2023), trainSize)
-trainDF <- ff_swing2023 %>% dplyr::slice(trainIndex)
-testDF <- ff_swing2023 %>% dplyr::slice(-trainIndex)
+trainDF <- ff_swing2022
+testDF <- ff_swing2023
 
 # Format data for xgboost
 dtrain <- xgb.DMatrix(data = as.matrix(select(trainDF, -swing)), 
@@ -223,7 +225,7 @@ dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -swing)),
 # subsample_choice <- 1.0
 # colsample_choice <- 0.6
 # 
-# ### Final check using the testing dataset ####
+# ### Final check using the testing dataset 
 ff_swing_model <- xgb.train(data = dtrain, verbose = 0,
                             watchlist = list(train = dtrain, test = dtest),
                             nrounds = 10000,
@@ -232,18 +234,23 @@ ff_swing_model <- xgb.train(data = dtrain, verbose = 0,
                             max_leaves = max_leaves_choice,
                             subsample = subsample_choice,
                             colsample_bytree = colsample_choice,
-                            eta = eta_choice)
+                            eta = eta_choice,
+                            objective = "binary:logistic")
 
-# ff_model$evaluation_log %>% 
-#   pivot_longer(cols = c(train_rmse, test_rmse), names_to = "RMSE") %>% 
-#   ggplot(aes(x = iter, y = value, color = RMSE)) + geom_line()
+ff_swing_model$evaluation_log %>%
+  pivot_longer(cols = c(train_logloss, test_logloss), names_to = "LogLoss") %>%
+  ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
 
-#### Run the model on the full dataset ####
+#### Run the model on the full dataset 
 ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(swing, pitcher))), 
                               label = clean_ff$swing)
 
 # Need to confirm that this is the correct way to make the prediction
-clean_ff$ff_stuff <- predict(ff_swing_model, ff_data_matrix)
+clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
+
+
+#### No swing model ####
+
 
 
 ### Convert to "plus" scale and re-attach pitcher IDs
@@ -253,18 +260,32 @@ pitcher_ids <- tbl(pitching_db, 'statcast') %>%
   collect()
 
 full_data <- tbl(pitching_db, 'statcast') %>%
-  filter(description %in% swing_events) %>%
-  mutate(walkflag = ifelse(grepl("walks", des), 1, 0)) %>%
-  filter(walkflag == 0) %>%
-  select(-walkflag) %>%
+  # Select only desired pitch type
+  filter(pitch_type == "FF") %>%
+  select(-fielder_2, -fielder_2_1, -fielder_3, -fielder_4, -fielder_5, 
+         -fielder_6, -fielder_7, -fielder_8, -fielder_9, -spin_rate_deprecated,
+         -break_angle_deprecated, -break_length_deprecated, -hit_location, -hc_x, -hc_y,
+         -batter, -home_team, -away_team, -on_3b, -on_2b, -on_1b, -tfs_deprecated, 
+         -tfs_zulu_deprecated, -hit_distance_sc, -estimated_ba_using_speedangle,
+         -estimated_woba_using_speedangle, -woba_value, -woba_denom, -babip_value,
+         -iso_value, -home_score, -away_score, -bat_score, -fld_score, -post_away_score,
+         -post_home_score, -post_fld_score, -if_fielding_alignment, -of_fielding_alignment,
+         -inning, -inning_topbot, -umpire, -pitcher_1, -at_bat_number, -post_bat_score,
+         -delta_home_win_exp, -fielding_team, -batting_team, -outs_when_up) %>%
+  # Construct some features
+  mutate(throw_r = ifelse(p_throws == "R", 1, 0),
+         throw_l = ifelse(p_throws == "L", 1, 0),
+         stand_r = ifelse(stand == "R", 1, 0),
+         stand_l = ifelse(stand == "L", 1, 0)) %>%
   collect() %>%
-  inner_join(ff_data, by = c("pitcher", "strikes", "balls", "delta_run_exp",
-                             "release_speed", "release_spin_rate", "pfx_x", "pfx_z"))
+  inner_join(clean_ff, by = c("pitcher", "release_speed", "release_spin_rate", "pfx_x", 
+                              "pfx_z", "release_extension", "balls", "strikes", "stand_l", 
+                              "stand_r", "throw_l", "throw_r", "spin_axis", "release_pos_x", 
+                              "release_pos_z"))
 
 
 pitcher_level2023 <- full_data %>%
-  mutate(year = substr(game_date, 1, 4)) %>%
-  filter(year == "2023") %>%
+  filter(game_year == 2023) %>%
   group_by(pitcher) %>%
   # Count number of pitches
   mutate(n_ff = n()) %>%
