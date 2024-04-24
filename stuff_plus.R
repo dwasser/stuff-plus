@@ -30,8 +30,8 @@ features <- c("release_speed", "release_spin_rate", "pfx_x", "pfx_z", "release_e
               "release_pos_x", "release_pos_z")
 
 #### Read-in data
-# Easily filter to include only swing events (removing bunts because they are weird)
 swing_events <- c("foul", "hit_into_play", "swinging_strike", "swinging_strike_blocked", "foul_tip")
+no_swing_events <- c("calledstrike", "ball", "hbp")
 
 ## Eliminate any swing events that are "weird"
 # For some pitches, the description shows a walk even though Statcast says a swing occurred.
@@ -104,10 +104,14 @@ raw_ff <- tbl(pitching_db, 'statcast') %>%
          ball = ifelse(description == "ball", 1, 0),
          inplay = ifelse(description == "hit_into_play", 1, 0),
          groundball = ifelse(bb_type == "ground_ball", 1, 0),
-         flyball = ifelse(bb_type %in% c("fly_ball", "line_drive", "popup"), 1, 0))
+         flyball = ifelse(bb_type %in% c("fly_ball", "line_drive", "popup"), 1, 0),
+         hbp = ifelse(description == "hit_into_play", 1, 0)) %>%
+  mutate(noswingevents = ifelse(calledstrike == 1, 0,
+                                ifelse(ball == 1, 1, 2)))
 
 # Select only the numeric vectors required for model:
-# Train on 2022 data, test on 2023 data
+# Train on 2022 data, test on 2023 data 
+# Next use: 2023 only for training, and split it within season
 ff_swing2022 <- raw_ff %>% 
   filter(game_year == 2022) %>%
   select(swing, all_of(features)) %>%
@@ -116,6 +120,19 @@ ff_swing2022 <- raw_ff %>%
 ff_swing2023 <- raw_ff %>% 
   filter(game_year == 2023) %>%
   select(swing, all_of(features)) %>%
+  collect()
+
+
+ff_noswing2022 <- raw_ff %>% 
+  filter(game_year == 2022) %>%
+  filter(description %in% no_swing_events) %>%
+  select(noswingevents, all_of(features)) %>%
+  collect()
+
+ff_noswing2023 <- raw_ff %>% 
+  filter(game_year == 2023) %>%
+  filter(description %in% no_swing_events) %>%
+  select(noswingevents, all_of(features)) %>%
   collect()
 
 clean_ff <- raw_ff %>% 
@@ -250,9 +267,50 @@ clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
 
 
 #### No swing model ####
+# Create train and test datasets (randomly select rows from cleaned data)
+trainDF <- ff_noswing2022
+testDF <- ff_noswing2023
+
+# Format data for xgboost
+dtrain <- xgb.DMatrix(data = as.matrix(select(trainDF, -noswingevents)), 
+                      label = trainDF$noswingevents)
+dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -noswingevents)), 
+                     label = testDF$noswingevents)
+
+## Skip parameter tuning for now
+
+# Train model
+numberOfClasses <- length(no_swing_events)
+ff_noswing_model <- xgb.train(data = dtrain, verbose = 0,
+                            watchlist = list(train = dtrain, test = dtest),
+                            nrounds = 10000,
+                            early_stopping_rounds = 50,
+                            max_depth = max_depth_choice,
+                            max_leaves = max_leaves_choice,
+                            subsample = subsample_choice,
+                            colsample_bytree = colsample_choice,
+                            eta = eta_choice,
+                            objective = "multi:softprob",
+                            eval_metric = "mlogloss",
+                            num_class = numberOfClasses)
 
 
+ff_noswing_model$evaluation_log %>%
+  pivot_longer(cols = c(train_mlogloss, test_mlogloss), names_to = "LogLoss") %>%
+  ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
 
+## HERE, NEED TO EVALUATE BASED ON CONFUSION MATRIX AND ALSO MAKE SPECIFIC PREDICTED CLASS
+## SEE TUTORIAL
+
+#### Run the model on the full dataset 
+ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(noswingevents, pitcher))), 
+                              label = clean_ff$noswingevents)
+
+# Need to confirm that this is the correct way to make the prediction
+clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
+
+
+#######################################################~
 ### Convert to "plus" scale and re-attach pitcher IDs
 pitcher_ids <- tbl(pitching_db, 'statcast') %>%
   select(pitcher, player_name) %>%
