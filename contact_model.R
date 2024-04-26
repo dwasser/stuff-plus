@@ -1,5 +1,4 @@
 #### Contact model
-#### Swing Model
 # Create train and test datasets (randomly select rows from cleaned data)
 trainDF <- ff_contact2022
 testDF <- ff_contact2023
@@ -105,5 +104,5 @@ ff_contact_model$evaluation_log %>%
   ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
 
 #### Run the model on the full dataset 
-ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(contact, pitcher))), 
+ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(all_of(all_outcomes), xswing, pitcher))), 
                               label = clean_ff$contact)

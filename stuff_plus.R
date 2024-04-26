@@ -34,6 +34,7 @@ swing_events <- c("foul", "hit_into_play", "swinging_strike", "swinging_strike_b
 no_swing_events <- c("called_strike", "ball", "hit_by_pitch")
 contact_events <- c("foul", "hit_into_play", "foul_tip", "foul_bunt", "bunt_foul_tip")
 all_outcomes <- c("swing", "noswingevents", "contact", "foul", "bip_events")
+bip_list <- c("ground_ball", "line_drive", "fly_ball", "popup")
 
 ## Eliminate any swing events that are "weird"
 # For some pitches, the description shows a walk even though Statcast says a swing occurred.
@@ -108,12 +109,12 @@ raw_ff <- tbl(pitching_db, 'statcast') %>%
          groundball = ifelse(bb_type == "ground_ball", 1, 0),
          linedrive = ifelse(bb_type == "line_drive", 1, 0),
          flyball = ifelse(bb_type %in% c("fly_ball", "popup"), 1, 0),
-         hbp = ifelse(description == "hit_into_play", 1, 0),
+         hbp = ifelse(description == "hit_by_pitch", 1, 0),
          contact = ifelse(description %in% contact_events, 1, 0)) %>%
   mutate(noswingevents = ifelse(swing == 1, NaN, ifelse(calledstrike == 1, 0, 
                                                  ifelse(ball == 1, 1, 2))),
          bip_events = ifelse(inplay == 0, NaN, ifelse(groundball == 1, 0,
-                                               ifelse(linedrive == 1, 2, 2))))
+                                               ifelse(linedrive == 1, 1, 2))))
 
 # Select only the numeric vectors required for model:
 # Train on 2022 data, test on 2023 data 
@@ -167,12 +168,14 @@ ff_foul2023 <- raw_ff %>%
 ff_bip2022 <- raw_ff %>% 
   filter(game_year == 2022) %>%
   filter(contact == 1) %>%
+  filter(bb_type %in% bip_list) %>%
   select(bip_events, all_of(features)) %>%
   collect()
 
-ff_foul2023 <- raw_ff %>% 
+ff_bip2023 <- raw_ff %>% 
   filter(game_year == 2023) %>%
   filter(contact == 1) %>%
+  filter(bb_type %in% bip_list) %>%
   select(bip_events, all_of(features)) %>%
   collect()
 
@@ -196,49 +199,67 @@ subsample_choice <- 1.0
 colsample_choice <- 0.6
 
 #### Swing Model ###
-source("swing_model.R", echo = TRUE)
+source("swing_model.R")
 
-# Need to confirm that this is the correct way to make the prediction
 clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
+
 
 #### No swing model ###
 source("noswing_model.R")
 
 # Need to confirm that this is the correct way to make the prediction
-#clean_ff$xnoswing <- predict(ff_noswing_model, ff_data_matrix)
 pred_noswing <- predict(ff_noswing_model, ff_data_matrix)
 noswing_prediction <- matrix(pred_noswing, nrow = numberOfClasses, ncol = length(pred_noswing)/numberOfClasses) %>% 
   t() %>% 
   data.frame() %>%
-  rename("xCalledstrike" = X1, "xBall" = X2, "xHBP" = X3) %>%
-  mutate(label = ff_data_labels,
-         max_prob = max.col(., "last") - 1,
-         check_sum = xCalledstrike + xBall + xHBP)
+  rename("xCalledstrike" = X1, 
+         "xBall" = X2, 
+         "xHBP" = X3)
+
+clean_ff_noswings <- cbind(clean_ff_noswings, noswing_prediction)
+
 
 #### Contact model ###
 source("contact_model.R")
 
-# Need to confirm that this is the correct way to make the prediction
 clean_ff$xcontact <- predict(ff_contact_model, ff_data_matrix)
+
 
 #### Foul Ball model ###
 source("foulball_model.R")
 
-# Need to confirm that this is the correct way to make the prediction
-clean_ff$xfoul <- predict(ff_foul_model, ff_data_matrix)
+clean_ff_contactonly$xfoul <- predict(ff_foul_model, ff_data_matrix)
+
 
 #### Ball in play (BIP) model ###
 source("bip_model.R")
 
-# Need to confirm that this is the correct way to make the prediction
+# Eventually, change outcomes to be launch angle/exit velocity bins and ignore the Statcast labels
 pred_bip <- predict(ff_bip_model, ff_data_matrix)
 bip_prediction <- matrix(pred_bip, nrow = numberOfClasses, ncol = length(pred_bip)/numberOfClasses) %>% 
   t() %>% 
   data.frame() %>%
-  rename("xGB" = X1, "xLD" = X2, "xFB" = X3) %>%
-  mutate(label = ff_data_labels,
-         max_prob = max.col(., "last") - 1,
-         check_sum = xGB + xLD + xFB)
+  rename("xGB" = X1, 
+         "xLD" = X2, 
+         "xFB" = X3)
+
+clean_ff_bip <- cbind(clean_ff_bip, bip_prediction)
+
+
+#######################################################~
+#### Combine all predictions
+all_predictions1 <- left_join(clean_ff, clean_ff_noswings, by = intersect(names(clean_ff), names(clean_ff_noswings)))
+all_predictions2 <- left_join(all_predictions1, clean_ff_contactonly, by = intersect(names(all_predictions1), names(clean_ff_contactonly)))
+all_predictions <- left_join(all_predictions2, clean_ff_bip, by = intersect(names(all_predictions2), names(clean_ff_bip)))
+
+rm(all_predictions1, all_predictions2)
+gc()
+
+
+#######################################################~
+#### Construct xRV using linear weights
+
+
 
 
 #######################################################~

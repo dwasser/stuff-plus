@@ -38,7 +38,7 @@ ff_noswing_model$evaluation_log %>%
 
 #### Run the model on the full dataset
 clean_ff_noswings <- clean_ff %>% filter(!is.na(noswingevents))
-ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff_noswings, -c(all_of(all_outcomes), pitcher))), 
+ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff_noswings, -c(all_of(all_outcomes), xswing, pitcher))), 
                               label = clean_ff_noswings$noswingevents)
 
 ff_data_labels <- clean_ff_noswings$noswingevents

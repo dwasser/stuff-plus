@@ -104,5 +104,6 @@ ff_foul_model$evaluation_log %>%
   ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
 
 #### Run the model on the full dataset 
-ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(foul, pitcher))), 
-                              label = clean_ff$foul)
+clean_ff_contactonly <- clean_ff %>% filter(contact == 1)
+ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff_contactonly, -c(all_of(all_outcomes), xswing, xcontact, pitcher))), 
+                              label = clean_ff_contactonly$foul)

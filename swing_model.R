@@ -104,5 +104,5 @@ ff_swing_model$evaluation_log %>%
   ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
 
 #### Run the model on the full dataset 
-ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(swing, pitcher))), 
+ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(all_of(all_outcomes), pitcher))), 
                               label = clean_ff$swing)
