@@ -31,7 +31,9 @@ features <- c("release_speed", "release_spin_rate", "pfx_x", "pfx_z", "release_e
 
 #### Read-in data
 swing_events <- c("foul", "hit_into_play", "swinging_strike", "swinging_strike_blocked", "foul_tip")
-no_swing_events <- c("calledstrike", "ball", "hbp")
+no_swing_events <- c("called_strike", "ball", "hit_by_pitch")
+contact_events <- c("foul", "hit_into_play", "foul_tip", "foul_bunt", "bunt_foul_tip")
+all_outcomes <- c("swing", "noswingevents", "contact", "foul", "bip_events")
 
 ## Eliminate any swing events that are "weird"
 # For some pitches, the description shows a walk even though Statcast says a swing occurred.
@@ -104,10 +106,14 @@ raw_ff <- tbl(pitching_db, 'statcast') %>%
          ball = ifelse(description == "ball", 1, 0),
          inplay = ifelse(description == "hit_into_play", 1, 0),
          groundball = ifelse(bb_type == "ground_ball", 1, 0),
-         flyball = ifelse(bb_type %in% c("fly_ball", "line_drive", "popup"), 1, 0),
-         hbp = ifelse(description == "hit_into_play", 1, 0)) %>%
-  mutate(noswingevents = ifelse(calledstrike == 1, 0,
-                                ifelse(ball == 1, 1, 2)))
+         linedrive = ifelse(bb_type == "line_drive", 1, 0),
+         flyball = ifelse(bb_type %in% c("fly_ball", "popup"), 1, 0),
+         hbp = ifelse(description == "hit_into_play", 1, 0),
+         contact = ifelse(description %in% contact_events, 1, 0)) %>%
+  mutate(noswingevents = ifelse(swing == 1, NaN, ifelse(calledstrike == 1, 0, 
+                                                 ifelse(ball == 1, 1, 2))),
+         bip_events = ifelse(inplay == 0, NaN, ifelse(groundball == 1, 0,
+                                               ifelse(linedrive == 1, 2, 2))))
 
 # Select only the numeric vectors required for model:
 # Train on 2022 data, test on 2023 data 
@@ -122,7 +128,6 @@ ff_swing2023 <- raw_ff %>%
   select(swing, all_of(features)) %>%
   collect()
 
-
 ff_noswing2022 <- raw_ff %>% 
   filter(game_year == 2022) %>%
   filter(description %in% no_swing_events) %>%
@@ -135,8 +140,45 @@ ff_noswing2023 <- raw_ff %>%
   select(noswingevents, all_of(features)) %>%
   collect()
 
+ff_contact2022 <- raw_ff %>% 
+  filter(game_year == 2022) %>%
+  filter(description %in% swing_events) %>%
+  select(contact, all_of(features)) %>%
+  collect()
+
+ff_contact2023 <- raw_ff %>% 
+  filter(game_year == 2023) %>%
+  filter(description %in% swing_events) %>%
+  select(contact, all_of(features)) %>%
+  collect()
+
+ff_foul2022 <- raw_ff %>% 
+  filter(game_year == 2022) %>%
+  filter(contact == 1) %>%
+  select(foul, all_of(features)) %>%
+  collect()
+
+ff_foul2023 <- raw_ff %>% 
+  filter(game_year == 2023) %>%
+  filter(contact == 1) %>%
+  select(foul, all_of(features)) %>%
+  collect()
+
+ff_bip2022 <- raw_ff %>% 
+  filter(game_year == 2022) %>%
+  filter(contact == 1) %>%
+  select(bip_events, all_of(features)) %>%
+  collect()
+
+ff_foul2023 <- raw_ff %>% 
+  filter(game_year == 2023) %>%
+  filter(contact == 1) %>%
+  select(bip_events, all_of(features)) %>%
+  collect()
+
+
 clean_ff <- raw_ff %>% 
-  select(pitcher, swing, all_of(features)) %>%
+  select(pitcher, all_of(all_outcomes), all_of(features)) %>%
   collect()
 
 rm(pitchers_batting, batters_pitching)
@@ -153,208 +195,97 @@ max_leaves_choice <- 63
 subsample_choice <- 1.0
 colsample_choice <- 0.6
 
-#### Swing Model ####
-# Create train and test datasets (randomly select rows from cleaned data)
-trainDF <- ff_swing2022
-testDF <- ff_swing2023
-
-# Format data for xgboost
-dtrain <- xgb.DMatrix(data = as.matrix(select(trainDF, -swing)), 
-                      label = trainDF$swing)
-dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -swing)), 
-                     label = testDF$swing)
-
-# Tune parameters ####
-# # Start by choosing eta from a list of candidate values
-# paramDF <- tibble(eta = c(0.001, 0.01, 0.05, 0.1, 0.2, 0.3))
-# 
-# # Next convert data frame to a list of lists
-# paramList <- lapply(split(paramDF, 1:nrow(paramDF)), as.list)
-# 
-# # Now write a loop to perform a cross validation using each value of paramList
-# bestResults <- tibble() # Collect best results here
-# 
-# pb <- txtProgressBar(style = 3) 
-# for(i in seq(length(paramList))) {
-#   rwCV <- xgb.cv(params = paramList[[i]], 
-#                  data = dtrain, 
-#                  nrounds = 200, 
-#                  nfold = 10,
-#                  early_stopping_rounds = 10,
-#                  verbose = TRUE)
-#   bestResults <- bestResults %>% 
-#     bind_rows(rwCV$evaluation_log[rwCV$best_iteration])
-#   gc() # Free unused memory after each loop iteration
-#   setTxtProgressBar(pb, i/length(paramList))
-# }
-# close(pb) # done with the progress bar
-# 
-# ## View results
-# etasearch <- bind_cols(paramDF, bestResults)
-# View(etasearch)
-# 
-# eta_choice <- 0.2
-# 
-# # Now find optimal depth and leaves at same time
-# paramDF <- expand.grid(
-#   max_depth = seq(15, 29, by = 2),
-#   max_leaves = c(63, 127, 255, 511, 1023, 2047, 4095),
-#   eta = eta_choice)
-# 
-# paramList <- lapply(split(paramDF, 1:nrow(paramDF)), as.list)
-# bestResults <- tibble()
-# 
-# 
-# pb <- txtProgressBar(style = 3)
-# for(i in seq(length(paramList))) {
-#   rwCV <- xgb.cv(params = paramList[[i]],
-#                  data = dtrain, 
-#                  nrounds = 200, 
-#                  nfold = 10,
-#                  early_stopping_rounds = 10,
-#                  verbose = FALSE)
-#   bestResults <- bestResults %>% 
-#     bind_rows(rwCV$evaluation_log[rwCV$best_iteration])
-#   gc() 
-#   setTxtProgressBar(pb, i/length(paramList))
-# }
-# close(pb)
-# 
-# depth_leaves <- bind_cols(paramDF, bestResults)
-# View(depth_leaves) 
-# 
-# max_depth_choice <- 15
-# max_leaves_choice <- 63
-# 
-# source(paste0(base,"/func/cvGridSearch.R"))
-# 
-# gc()
-# 
-# paramDF <- expand.grid(
-#   subsample = seq(0.6, 1, by = 0.1),
-#   colsample_bytree = seq(0.6, 1, by = 0.1),
-#   max_depth = max_depth_choice,
-#   max_leaves = max_leaves_choice,
-#   eta = eta_choice)
-# 
-# randsubsets <- GridSearch(paramDF, dtrain)
-# 
-# subsample_choice <- 1.0
-# colsample_choice <- 0.6
-# 
-# ### Final check using the testing dataset 
-ff_swing_model <- xgb.train(data = dtrain, verbose = 0,
-                            watchlist = list(train = dtrain, test = dtest),
-                            nrounds = 10000,
-                            early_stopping_rounds = 50,
-                            max_depth = max_depth_choice,
-                            max_leaves = max_leaves_choice,
-                            subsample = subsample_choice,
-                            colsample_bytree = colsample_choice,
-                            eta = eta_choice,
-                            objective = "binary:logistic")
-
-ff_swing_model$evaluation_log %>%
-  pivot_longer(cols = c(train_logloss, test_logloss), names_to = "LogLoss") %>%
-  ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
-
-#### Run the model on the full dataset 
-ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(swing, pitcher))), 
-                              label = clean_ff$swing)
+#### Swing Model ###
+source("swing_model.R", echo = TRUE)
 
 # Need to confirm that this is the correct way to make the prediction
 clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
 
-
-#### No swing model ####
-# Create train and test datasets (randomly select rows from cleaned data)
-trainDF <- ff_noswing2022
-testDF <- ff_noswing2023
-
-# Format data for xgboost
-dtrain <- xgb.DMatrix(data = as.matrix(select(trainDF, -noswingevents)), 
-                      label = trainDF$noswingevents)
-dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -noswingevents)), 
-                     label = testDF$noswingevents)
-
-## Skip parameter tuning for now
-
-# Train model
-numberOfClasses <- length(no_swing_events)
-ff_noswing_model <- xgb.train(data = dtrain, verbose = 0,
-                            watchlist = list(train = dtrain, test = dtest),
-                            nrounds = 10000,
-                            early_stopping_rounds = 50,
-                            max_depth = max_depth_choice,
-                            max_leaves = max_leaves_choice,
-                            subsample = subsample_choice,
-                            colsample_bytree = colsample_choice,
-                            eta = eta_choice,
-                            objective = "multi:softprob",
-                            eval_metric = "mlogloss",
-                            num_class = numberOfClasses)
-
-
-ff_noswing_model$evaluation_log %>%
-  pivot_longer(cols = c(train_mlogloss, test_mlogloss), names_to = "LogLoss") %>%
-  ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
-
-## HERE, NEED TO EVALUATE BASED ON CONFUSION MATRIX AND ALSO MAKE SPECIFIC PREDICTED CLASS
-## SEE TUTORIAL
-
-#### Run the model on the full dataset 
-ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(noswingevents, pitcher))), 
-                              label = clean_ff$noswingevents)
+#### No swing model ###
+source("noswing_model.R")
 
 # Need to confirm that this is the correct way to make the prediction
-clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
+#clean_ff$xnoswing <- predict(ff_noswing_model, ff_data_matrix)
+pred_noswing <- predict(ff_noswing_model, ff_data_matrix)
+noswing_prediction <- matrix(pred_noswing, nrow = numberOfClasses, ncol = length(pred_noswing)/numberOfClasses) %>% 
+  t() %>% 
+  data.frame() %>%
+  rename("xCalledstrike" = X1, "xBall" = X2, "xHBP" = X3) %>%
+  mutate(label = ff_data_labels,
+         max_prob = max.col(., "last") - 1,
+         check_sum = xCalledstrike + xBall + xHBP)
+
+#### Contact model ###
+source("contact_model.R")
+
+# Need to confirm that this is the correct way to make the prediction
+clean_ff$xcontact <- predict(ff_contact_model, ff_data_matrix)
+
+#### Foul Ball model ###
+source("foulball_model.R")
+
+# Need to confirm that this is the correct way to make the prediction
+clean_ff$xfoul <- predict(ff_foul_model, ff_data_matrix)
+
+#### Ball in play (BIP) model ###
+source("bip_model.R")
+
+# Need to confirm that this is the correct way to make the prediction
+pred_bip <- predict(ff_bip_model, ff_data_matrix)
+bip_prediction <- matrix(pred_bip, nrow = numberOfClasses, ncol = length(pred_bip)/numberOfClasses) %>% 
+  t() %>% 
+  data.frame() %>%
+  rename("xGB" = X1, "xLD" = X2, "xFB" = X3) %>%
+  mutate(label = ff_data_labels,
+         max_prob = max.col(., "last") - 1,
+         check_sum = xGB + xLD + xFB)
 
 
 #######################################################~
-### Convert to "plus" scale and re-attach pitcher IDs
-pitcher_ids <- tbl(pitching_db, 'statcast') %>%
-  select(pitcher, player_name) %>%
-  distinct() %>%
-  collect()
-
-full_data <- tbl(pitching_db, 'statcast') %>%
-  # Select only desired pitch type
-  filter(pitch_type == "FF") %>%
-  select(-fielder_2, -fielder_2_1, -fielder_3, -fielder_4, -fielder_5, 
-         -fielder_6, -fielder_7, -fielder_8, -fielder_9, -spin_rate_deprecated,
-         -break_angle_deprecated, -break_length_deprecated, -hit_location, -hc_x, -hc_y,
-         -batter, -home_team, -away_team, -on_3b, -on_2b, -on_1b, -tfs_deprecated, 
-         -tfs_zulu_deprecated, -hit_distance_sc, -estimated_ba_using_speedangle,
-         -estimated_woba_using_speedangle, -woba_value, -woba_denom, -babip_value,
-         -iso_value, -home_score, -away_score, -bat_score, -fld_score, -post_away_score,
-         -post_home_score, -post_fld_score, -if_fielding_alignment, -of_fielding_alignment,
-         -inning, -inning_topbot, -umpire, -pitcher_1, -at_bat_number, -post_bat_score,
-         -delta_home_win_exp, -fielding_team, -batting_team, -outs_when_up) %>%
-  # Construct some features
-  mutate(throw_r = ifelse(p_throws == "R", 1, 0),
-         throw_l = ifelse(p_throws == "L", 1, 0),
-         stand_r = ifelse(stand == "R", 1, 0),
-         stand_l = ifelse(stand == "L", 1, 0)) %>%
-  collect() %>%
-  inner_join(clean_ff, by = c("pitcher", "release_speed", "release_spin_rate", "pfx_x", 
-                              "pfx_z", "release_extension", "balls", "strikes", "stand_l", 
-                              "stand_r", "throw_l", "throw_r", "spin_axis", "release_pos_x", 
-                              "release_pos_z"))
-
-
-pitcher_level2023 <- full_data %>%
-  filter(game_year == 2023) %>%
-  group_by(pitcher) %>%
-  # Count number of pitches
-  mutate(n_ff = n()) %>%
-  # Multiply stuff by -1 to re-orient for ordinal ranking where higher == better
-  mutate(ff_stuff = -1*ff_stuff) %>%
-  summarize(avg_ff_pred = mean(ff_stuff),
-            n_ff = max(n_ff)) %>%
-  ungroup() %>%
-  filter(n_ff >= 500) %>%
-  mutate(avg_ffstuff_all = mean(avg_ff_pred),
-         ff_stuff_plus = round(100*(avg_ff_pred/avg_ffstuff_all))) %>%
-  inner_join(pitcher_ids, by = "pitcher") %>%
-  arrange(-ff_stuff_plus)
+# ### Convert to "plus" scale and re-attach pitcher IDs
+# pitcher_ids <- tbl(pitching_db, 'statcast') %>%
+#   select(pitcher, player_name) %>%
+#   distinct() %>%
+#   collect()
+# 
+# full_data <- tbl(pitching_db, 'statcast') %>%
+#   # Select only desired pitch type
+#   filter(pitch_type == "FF") %>%
+#   select(-fielder_2, -fielder_2_1, -fielder_3, -fielder_4, -fielder_5, 
+#          -fielder_6, -fielder_7, -fielder_8, -fielder_9, -spin_rate_deprecated,
+#          -break_angle_deprecated, -break_length_deprecated, -hit_location, -hc_x, -hc_y,
+#          -batter, -home_team, -away_team, -on_3b, -on_2b, -on_1b, -tfs_deprecated, 
+#          -tfs_zulu_deprecated, -hit_distance_sc, -estimated_ba_using_speedangle,
+#          -estimated_woba_using_speedangle, -woba_value, -woba_denom, -babip_value,
+#          -iso_value, -home_score, -away_score, -bat_score, -fld_score, -post_away_score,
+#          -post_home_score, -post_fld_score, -if_fielding_alignment, -of_fielding_alignment,
+#          -inning, -inning_topbot, -umpire, -pitcher_1, -at_bat_number, -post_bat_score,
+#          -delta_home_win_exp, -fielding_team, -batting_team, -outs_when_up) %>%
+#   # Construct some features
+#   mutate(throw_r = ifelse(p_throws == "R", 1, 0),
+#          throw_l = ifelse(p_throws == "L", 1, 0),
+#          stand_r = ifelse(stand == "R", 1, 0),
+#          stand_l = ifelse(stand == "L", 1, 0)) %>%
+#   collect() %>%
+#   inner_join(clean_ff, by = c("pitcher", "release_speed", "release_spin_rate", "pfx_x", 
+#                               "pfx_z", "release_extension", "balls", "strikes", "stand_l", 
+#                               "stand_r", "throw_l", "throw_r", "spin_axis", "release_pos_x", 
+#                               "release_pos_z"))
+# 
+# 
+# pitcher_level2023 <- full_data %>%
+#   filter(game_year == 2023) %>%
+#   group_by(pitcher) %>%
+#   # Count number of pitches
+#   mutate(n_ff = n()) %>%
+#   # Multiply stuff by -1 to re-orient for ordinal ranking where higher == better
+#   mutate(ff_stuff = -1*ff_stuff) %>%
+#   summarize(avg_ff_pred = mean(ff_stuff),
+#             n_ff = max(n_ff)) %>%
+#   ungroup() %>%
+#   filter(n_ff >= 500) %>%
+#   mutate(avg_ffstuff_all = mean(avg_ff_pred),
+#          ff_stuff_plus = round(100*(avg_ff_pred/avg_ffstuff_all))) %>%
+#   inner_join(pitcher_ids, by = "pitcher") %>%
+#   arrange(-ff_stuff_plus)
 
