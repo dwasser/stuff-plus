@@ -1,7 +1,11 @@
 #### Swing Model
 # Create train and test datasets (randomly select rows from cleaned data)
-trainDF <- ff_swing2022
-testDF <- ff_swing2023
+trainsplit <- 0.75
+train_index <- sample(1:nrow(ff_swing2023), nrow(ff_swing2023)*trainsplit)
+
+trainDF <- ff_swing2023[train_index,]
+testDF <- ff_swing2023[-train_index,]
+
 
 # Format data for xgboost
 dtrain <- xgb.DMatrix(data = as.matrix(select(trainDF, -swing)), 
@@ -9,72 +13,36 @@ dtrain <- xgb.DMatrix(data = as.matrix(select(trainDF, -swing)),
 dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -swing)), 
                      label = testDF$swing)
 
-# Tune parameters ####
-# # Start by choosing eta from a list of candidate values
-# paramDF <- tibble(eta = c(0.001, 0.01, 0.05, 0.1, 0.2, 0.3))
+
+## Parameter tuning
+xgb_params <- list("objective" = "binary:logistic")
+
+# Cross-validation parameters
+nround <- 200 # Number of XGBoost rounds
+cv.nfold <- 10
+
+
+#### Tune hyperparameters
+### Eta
+candidates <- tibble(eta = c(0.001, 0.01, 0.05, 0.1, 0.2, 0.3))
+etasearch <- cvGridSearch(candidates, dtrain = dtrain, cvnfolds = cv.nfold, cvnrounds = nround)
+
+eta_choice <- etasearch$eta[etasearch$test_rmse_mean == min(etasearch$test_rmse_mean)]
+rm(etasearch, candidates)
+print(paste0("Eta choice: ", eta_choice))
+
+### Maximum Depth
+candidates <- expand.grid(max_depth = seq(15, 29, by = 2),
+                          eta = eta_choice)
+# depth_search <- cvGridSearch(candidates, dtrain = dtrain, cvnfolds = cv.nfold, cvnrounds = nround)
 # 
-# # Next convert data frame to a list of lists
-# paramList <- lapply(split(paramDF, 1:nrow(paramDF)), as.list)
+# depth_choice <- depth_search$max_depth[depth_search$test_rmse_mean == min(depth_search$test_rmse_mean)]
+# rm(depth_search, candidates)
 # 
-# # Now write a loop to perform a cross validation using each value of paramList
-# bestResults <- tibble() # Collect best results here
-# 
-# pb <- txtProgressBar(style = 3) 
-# for(i in seq(length(paramList))) {
-#   rwCV <- xgb.cv(params = paramList[[i]], 
-#                  data = dtrain, 
-#                  nrounds = 200, 
-#                  nfold = 10,
-#                  early_stopping_rounds = 10,
-#                  verbose = TRUE)
-#   bestResults <- bestResults %>% 
-#     bind_rows(rwCV$evaluation_log[rwCV$best_iteration])
-#   gc() # Free unused memory after each loop iteration
-#   setTxtProgressBar(pb, i/length(paramList))
-# }
-# close(pb) # done with the progress bar
-# 
-# ## View results
-# etasearch <- bind_cols(paramDF, bestResults)
-# View(etasearch)
-# 
-# eta_choice <- 0.2
-# 
-# # Now find optimal depth and leaves at same time
-# paramDF <- expand.grid(
-#   max_depth = seq(15, 29, by = 2),
-#   max_leaves = c(63, 127, 255, 511, 1023, 2047, 4095),
-#   eta = eta_choice)
-# 
-# paramList <- lapply(split(paramDF, 1:nrow(paramDF)), as.list)
-# bestResults <- tibble()
-# 
-# 
-# pb <- txtProgressBar(style = 3)
-# for(i in seq(length(paramList))) {
-#   rwCV <- xgb.cv(params = paramList[[i]],
-#                  data = dtrain, 
-#                  nrounds = 200, 
-#                  nfold = 10,
-#                  early_stopping_rounds = 10,
-#                  verbose = FALSE)
-#   bestResults <- bestResults %>% 
-#     bind_rows(rwCV$evaluation_log[rwCV$best_iteration])
-#   gc() 
-#   setTxtProgressBar(pb, i/length(paramList))
-# }
-# close(pb)
-# 
-# depth_leaves <- bind_cols(paramDF, bestResults)
-# View(depth_leaves) 
-# 
-# max_depth_choice <- 15
-# max_leaves_choice <- 63
-# 
-# source(paste0(base,"/func/cvGridSearch.R"))
-# 
-# gc()
-# 
+# print(paste0("Max depth choice: ", depth_choice))
+depth_choice <- 15
+
+
 # paramDF <- expand.grid(
 #   subsample = seq(0.6, 1, by = 0.1),
 #   colsample_bytree = seq(0.6, 1, by = 0.1),
@@ -86,22 +54,24 @@ dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -swing)),
 # 
 # subsample_choice <- 1.0
 # colsample_choice <- 0.6
-# 
+
 # ### Final check using the testing dataset 
-ff_swing_model <- xgb.train(data = dtrain, verbose = 0,
+ff_swing_model <- xgb.train(data = dtrain, 
+                            verbose = 0,
                             watchlist = list(train = dtrain, test = dtest),
-                            nrounds = 10000,
+                            nrounds = nround,
                             early_stopping_rounds = 50,
-                            max_depth = max_depth_choice,
-                            max_leaves = max_leaves_choice,
-                            subsample = subsample_choice,
-                            colsample_bytree = colsample_choice,
                             eta = eta_choice,
-                            objective = "binary:logistic")
+                            max_depth = max_depth_choice,
+                            #subsample = subsample_choice,
+                            #colsample_bytree = colsample_choice,
+                            params = xgb_params)
 
 ff_swing_model$evaluation_log %>%
   pivot_longer(cols = c(train_logloss, test_logloss), names_to = "LogLoss") %>%
-  ggplot(aes(x = iter, y = value, color = LogLoss)) + geom_line()
+  ggplot(aes(x = iter, y = value, color = LogLoss)) + 
+  geom_line() +
+  ggtitle("Swing Model")
 
 #### Run the model on the full dataset 
 ff_data_matrix <- xgb.DMatrix(data = as.matrix(select(clean_ff, -c(all_of(all_outcomes), pitcher))), 

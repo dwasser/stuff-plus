@@ -1,11 +1,11 @@
 # Build my own version of Stuff Plus
 require(baseballr)
-require(tidyverse)
-require(dplyr)
+require(caret)
 require(DBI)
-require(RPostgres)
-#require(Rtools)
+require(dplyr)
 require(drat)
+require(RPostgres)
+require(tidyverse)
 require(xgboost)
 
 pw <- {
@@ -24,6 +24,10 @@ base <- "C:/Users/David Wasser/Dropbox/David/Baseball/pitching/stuff-plus"
 setwd(base)
 set.seed(62704) 
 
+#### Read-in user-created functions
+source("func/cvGridSearch.R")
+
+
 #### Choose features
 features <- c("release_speed", "release_spin_rate", "pfx_x", "pfx_z", "release_extension",
               "balls", "strikes", "stand_l", "stand_r", "throw_l", "throw_r", "spin_axis", 
@@ -36,8 +40,6 @@ contact_events <- c("foul", "hit_into_play", "foul_tip", "foul_bunt", "bunt_foul
 all_outcomes <- c("swing", "noswingevents", "contact", "foul", "bip_events")
 bip_list <- c("ground_ball", "line_drive", "fly_ball", "popup")
 
-## Eliminate any swing events that are "weird"
-# For some pitches, the description shows a walk even though Statcast says a swing occurred.
 
 # Remove position players pitching and pitchers with less than 100 pitches thrown
 # Do this by finding the pitchers who threw less than 100 pitches during 2017-present
@@ -51,18 +53,18 @@ batters_pitching <- tbl(pitching_db, 'statcast') %>%
 
 ## Remove pitchers batting (except Ohtani and Lorenzen)
 # Do this by finding the players who threw at least 100 pitches during 2017-present
-pitchers_batting <- tbl(pitching_db, 'statcast') %>% 
-  group_by(pitcher) %>% 
-  summarize(pitches = n()) %>%
-  ungroup() %>%
-  filter(pitches >= 100, pitcher != "660271", pitcher!= "547179") %>%
-  select(pitcher)
+# pitchers_batting <- tbl(pitching_db, 'statcast') %>% 
+#   group_by(pitcher) %>% 
+#   summarize(pitches = n()) %>%
+#   ungroup() %>%
+#   filter(pitches >= 100, pitcher != "660271", pitcher!= "547179") %>%
+#   select(pitcher)
 
 raw_ff <- tbl(pitching_db, 'statcast') %>%
   # Remove batters pitching 
   inner_join(batters_pitching, by = "pitcher") %>%
   # Remove pitchers batting
-  anti_join(pitchers_batting, by = c("batter" = "pitcher")) %>%
+  #anti_join(pitchers_batting, by = c("batter" = "pitcher")) %>%
   # Select only desired pitch type
   filter(pitch_type == "FF") %>%
   # Drop weird observations where both a swing and a walk are recorded simultaneously
@@ -117,22 +119,10 @@ raw_ff <- tbl(pitching_db, 'statcast') %>%
                                                ifelse(linedrive == 1, 1, 2))))
 
 # Select only the numeric vectors required for model:
-# Train on 2022 data, test on 2023 data 
-# Next use: 2023 only for training, and split it within season
-ff_swing2022 <- raw_ff %>% 
-  filter(game_year == 2022) %>%
-  select(swing, all_of(features)) %>%
-  collect()
-
+# Use only 2023 for training, and split it within season (then 2024 once I have it)
 ff_swing2023 <- raw_ff %>% 
   filter(game_year == 2023) %>%
   select(swing, all_of(features)) %>%
-  collect()
-
-ff_noswing2022 <- raw_ff %>% 
-  filter(game_year == 2022) %>%
-  filter(description %in% no_swing_events) %>%
-  select(noswingevents, all_of(features)) %>%
   collect()
 
 ff_noswing2023 <- raw_ff %>% 
@@ -141,35 +131,16 @@ ff_noswing2023 <- raw_ff %>%
   select(noswingevents, all_of(features)) %>%
   collect()
 
-ff_contact2022 <- raw_ff %>% 
-  filter(game_year == 2022) %>%
-  filter(description %in% swing_events) %>%
-  select(contact, all_of(features)) %>%
-  collect()
-
 ff_contact2023 <- raw_ff %>% 
   filter(game_year == 2023) %>%
   filter(description %in% swing_events) %>%
   select(contact, all_of(features)) %>%
   collect()
 
-ff_foul2022 <- raw_ff %>% 
-  filter(game_year == 2022) %>%
-  filter(contact == 1) %>%
-  select(foul, all_of(features)) %>%
-  collect()
-
 ff_foul2023 <- raw_ff %>% 
   filter(game_year == 2023) %>%
   filter(contact == 1) %>%
   select(foul, all_of(features)) %>%
-  collect()
-
-ff_bip2022 <- raw_ff %>% 
-  filter(game_year == 2022) %>%
-  filter(contact == 1) %>%
-  filter(bb_type %in% bip_list) %>%
-  select(bip_events, all_of(features)) %>%
   collect()
 
 ff_bip2023 <- raw_ff %>% 
@@ -187,27 +158,22 @@ clean_ff <- raw_ff %>%
 rm(pitchers_batting, batters_pitching)
 gc()
 
-#### Aim: predict specific outcomes, will then attach expected run values to those outcomes 
-# Expected runs for each count: https://en.wikipedia.org/wiki/Pitch_quantification
-# Expected runs for each event: https://library.fangraphs.com/principles/linear-weights/
 
+
+#### Eventually create a toggle for whether I want to tune the parameters
 # For now, just use cross-validated parameters from previous version of model
-eta_choice <- 0.2
 max_depth_choice <- 15
-max_leaves_choice <- 63
 subsample_choice <- 1.0
 colsample_choice <- 0.6
 
+
 #### Swing Model ###
 source("swing_model.R")
-
 clean_ff$xswing <- predict(ff_swing_model, ff_data_matrix)
 
 
 #### No swing model ###
 source("noswing_model.R")
-
-# Need to confirm that this is the correct way to make the prediction
 pred_noswing <- predict(ff_noswing_model, ff_data_matrix)
 noswing_prediction <- matrix(pred_noswing, nrow = numberOfClasses, ncol = length(pred_noswing)/numberOfClasses) %>% 
   t() %>% 
@@ -221,13 +187,11 @@ clean_ff_noswings <- cbind(clean_ff_noswings, noswing_prediction)
 
 #### Contact model ###
 source("contact_model.R")
-
 clean_ff$xcontact <- predict(ff_contact_model, ff_data_matrix)
 
 
 #### Foul Ball model ###
 source("foulball_model.R")
-
 clean_ff_contactonly$xfoul <- predict(ff_foul_model, ff_data_matrix)
 
 
@@ -258,55 +222,78 @@ gc()
 
 #######################################################~
 #### Construct xRV using linear weights
+# For now, LWTS taken from here: https://library.fangraphs.com/pitching/pitchingbot-pitch-modeling-primer/
+# RV for bip: https://jstinchen.medium.com/prevent-my-expected-run-value-metric-e7e5f6687f58
+lwt_foul <- 0
+lwt_ball <- 0.127
+lwt_hbp <- 0.57
+lwt_strike <- -0.235
+lwt_gb <- -0.055
+lwt_ld <- 0.277
+lwt_fb <- 0.103
 
+all_predictions <- all_predictions %>%
+  mutate(xCalledstrike = ifelse(is.na(xCalledstrike), 0, xCalledstrike),
+         xBall = ifelse(is.na(xBall), 0, xBall),
+         xfoul = ifelse(is.na(xfoul), 0, xfoul),
+         xHBP = ifelse(is.na(xHBP), 0, xHBP),
+         xcontact = ifelse(is.na(xcontact), 0, xcontact),
+         xGB = ifelse(is.na(xGB), 0, xGB),
+         xLD = ifelse(is.na(xLD), 0, xLD),
+         xFB = ifelse(is.na(xFB), 0, xFB)) %>%
+  mutate(xRV_all = xfoul*lwt_foul + xBall*lwt_ball + xHBP*lwt_hbp + xCalledstrike*lwt_strike + (1-xcontact)*lwt_strike + xGB*lwt_gb + xLD*lwt_ld + xFB*lwt_fb,
+         # Follow Fangraphs and only use models that predict swing events in order to not just predict zone rate
+         xRV_swings = xfoul*lwt_foul + (1-xcontact)*lwt_strike + xGB*lwt_gb + xLD*lwt_ld + xFB*lwt_fb)
 
-
+rm(bip_prediction, noswing_prediction)
 
 #######################################################~
-# ### Convert to "plus" scale and re-attach pitcher IDs
-# pitcher_ids <- tbl(pitching_db, 'statcast') %>%
-#   select(pitcher, player_name) %>%
-#   distinct() %>%
-#   collect()
-# 
-# full_data <- tbl(pitching_db, 'statcast') %>%
-#   # Select only desired pitch type
-#   filter(pitch_type == "FF") %>%
-#   select(-fielder_2, -fielder_2_1, -fielder_3, -fielder_4, -fielder_5, 
-#          -fielder_6, -fielder_7, -fielder_8, -fielder_9, -spin_rate_deprecated,
-#          -break_angle_deprecated, -break_length_deprecated, -hit_location, -hc_x, -hc_y,
-#          -batter, -home_team, -away_team, -on_3b, -on_2b, -on_1b, -tfs_deprecated, 
-#          -tfs_zulu_deprecated, -hit_distance_sc, -estimated_ba_using_speedangle,
-#          -estimated_woba_using_speedangle, -woba_value, -woba_denom, -babip_value,
-#          -iso_value, -home_score, -away_score, -bat_score, -fld_score, -post_away_score,
-#          -post_home_score, -post_fld_score, -if_fielding_alignment, -of_fielding_alignment,
-#          -inning, -inning_topbot, -umpire, -pitcher_1, -at_bat_number, -post_bat_score,
-#          -delta_home_win_exp, -fielding_team, -batting_team, -outs_when_up) %>%
-#   # Construct some features
-#   mutate(throw_r = ifelse(p_throws == "R", 1, 0),
-#          throw_l = ifelse(p_throws == "L", 1, 0),
-#          stand_r = ifelse(stand == "R", 1, 0),
-#          stand_l = ifelse(stand == "L", 1, 0)) %>%
-#   collect() %>%
-#   inner_join(clean_ff, by = c("pitcher", "release_speed", "release_spin_rate", "pfx_x", 
-#                               "pfx_z", "release_extension", "balls", "strikes", "stand_l", 
-#                               "stand_r", "throw_l", "throw_r", "spin_axis", "release_pos_x", 
-#                               "release_pos_z"))
-# 
-# 
-# pitcher_level2023 <- full_data %>%
-#   filter(game_year == 2023) %>%
-#   group_by(pitcher) %>%
-#   # Count number of pitches
-#   mutate(n_ff = n()) %>%
-#   # Multiply stuff by -1 to re-orient for ordinal ranking where higher == better
-#   mutate(ff_stuff = -1*ff_stuff) %>%
-#   summarize(avg_ff_pred = mean(ff_stuff),
-#             n_ff = max(n_ff)) %>%
-#   ungroup() %>%
-#   filter(n_ff >= 500) %>%
-#   mutate(avg_ffstuff_all = mean(avg_ff_pred),
-#          ff_stuff_plus = round(100*(avg_ff_pred/avg_ffstuff_all))) %>%
-#   inner_join(pitcher_ids, by = "pitcher") %>%
-#   arrange(-ff_stuff_plus)
+### Convert to "plus" scale and re-attach pitcher IDs
+pitcher_ids <- tbl(pitching_db, 'statcast') %>%
+  select(pitcher, player_name) %>%
+  distinct() %>%
+  collect()
+
+full_data <- tbl(pitching_db, 'statcast') %>%
+  # Select only desired pitch type
+  filter(pitch_type == "FF") %>%
+  select(-fielder_2, -fielder_2_1, -fielder_3, -fielder_4, -fielder_5,
+         -fielder_6, -fielder_7, -fielder_8, -fielder_9, -spin_rate_deprecated,
+         -break_angle_deprecated, -break_length_deprecated, -hit_location, -hc_x, -hc_y,
+         -batter, -home_team, -away_team, -on_3b, -on_2b, -on_1b, -tfs_deprecated,
+         -tfs_zulu_deprecated, -hit_distance_sc, -estimated_ba_using_speedangle,
+         -estimated_woba_using_speedangle, -woba_value, -woba_denom, -babip_value,
+         -iso_value, -home_score, -away_score, -bat_score, -fld_score, -post_away_score,
+         -post_home_score, -post_fld_score, -if_fielding_alignment, -of_fielding_alignment,
+         -inning, -inning_topbot, -umpire, -pitcher_1, -at_bat_number, -post_bat_score,
+         -delta_home_win_exp, -fielding_team, -batting_team, -outs_when_up) %>%
+  # Construct some features
+  mutate(throw_r = ifelse(p_throws == "R", 1, 0),
+         throw_l = ifelse(p_throws == "L", 1, 0),
+         stand_r = ifelse(stand == "R", 1, 0),
+         stand_l = ifelse(stand == "L", 1, 0)) %>%
+  collect()
+
+full_data <- inner_join(full_data, all_predictions, by = intersect(names(full_data), names(all_predictions)))
+
+
+pitcher_level2023 <- full_data %>%
+  filter(game_year == 2023) %>%
+  filter(player_name != "") %>%
+  group_by(pitcher) %>%
+  # Count number of pitches
+  mutate(n_ff = n()) %>%
+  filter(n_ff >= 100) %>%
+  # Winsorize values at 1% and 99% levels
+  mutate(xRV = ifelse(xRV_swings >= quantile(xRV_swings, c(0.99)), quantile(xRV_swings, c(0.99)), xRV_swings),
+         xRV = ifelse(xRV_swings <= quantile(xRV_swings, c(0.01)), quantile(xRV_swings, c(0.01)), xRV_swings)) %>%
+  # Multiply stuff by -1 to re-orient for ordinal ranking where higher == better
+  mutate(ff_stuff = -1*xRV_swings) %>%
+  summarize(avg_ff_pred = mean(ff_stuff),
+            n_ff = max(n_ff)) %>%
+  ungroup() %>%
+  mutate(avg_ffstuff_all = mean(avg_ff_pred),
+         ff_stuff_plus = round(100*(avg_ff_pred/avg_ffstuff_all))) %>%
+  inner_join(pitcher_ids, by = "pitcher") %>%
+  arrange(-ff_stuff_plus)
 
