@@ -14,7 +14,7 @@ dtest <- xgb.DMatrix(data = as.matrix(select(testDF, -bip_events)),
                      label = testDF$bip_events)
 
 ## Parameter tuning
-numberOfClasses <- length(bip_list) - 1
+numberOfClasses <- n_battedball_bins
 xgb_params <- list("objective" = "multi:softprob",
                    "eval_metric" = "mlogloss",
                    "num_class" = numberOfClasses)
@@ -33,23 +33,24 @@ cv_bip_model <- xgb.cv(params = xgb_params,
 
 OOF_prediction <- data.frame(cv_bip_model$pred) %>%
   mutate(max_prob = max.col(., ties.method = "last"),
-         label = trainDF$bip_events + 1)
+         label = trainDF$bip_events)
 head(OOF_prediction)
 
 # Confusion matrix
 confusionMatrix(factor(OOF_prediction$max_prob),
-                factor(OOF_prediction$label),
+                factor(OOF_prediction$label + 1),
                 mode = "everything")
 
 
 #### Tune hyperparameters
 ### Eta
-candidates <- tibble(eta = c(0.001, 0.01, 0.05, 0.1, 0.2, 0.3))
-etasearch <- cvGridSearch(candidates, dtrain = dtrain, cvnfolds = cv.nfold, cvnrounds = nround)
-
-eta_choice <- etasearch$eta[etasearch$test_rmse_mean == min(etasearch$test_rmse_mean)]
-rm(etasearch, candidates)
-print(paste0("Eta choice: ", eta_choice))
+# candidates <- tibble(eta = c(0.001, 0.01, 0.05, 0.1, 0.2, 0.3))
+# etasearch <- cvGridSearch(candidates, dtrain = dtrain, cvnfolds = cv.nfold, cvnrounds = nround)
+# 
+# eta_choice <- etasearch$eta[etasearch$test_rmse_mean == min(etasearch$test_rmse_mean)]
+# rm(etasearch, candidates)
+# print(paste0("Eta choice: ", eta_choice))
+eta_choice <- 0.05
 
 ### Maximum Depth
 candidates <- expand.grid(max_depth = seq(15, 29, by = 2),
@@ -81,12 +82,12 @@ test_prediction <- matrix(test_pred, nrow = numberOfClasses,
                           ncol=length(test_pred)/numberOfClasses) %>%
   t() %>%
   data.frame() %>%
-  mutate(label = testDF$bip_events + 1,
+  mutate(label = testDF$bip_events,
          max_prob = max.col(., "last"))
 
 # Confusion matrix of test set
 confusionMatrix(factor(test_prediction$max_prob),
-                factor(test_prediction$label),
+                factor(test_prediction$label + 1),
                 mode = "everything")
 
 ## Variable importance
@@ -96,8 +97,8 @@ importance_matrix = xgb.importance(feature_names = names, model = ff_bip_model)
 head(importance_matrix)
 
 # Plot
-gp = xgb.ggplot.importance(importance_matrix) + ggtitle("ff_bip_model")
-print(gp) 
+#gp = xgb.ggplot.importance(importance_matrix) + ggtitle("ff_bip_model")
+#print(gp) 
 
 
 ff_bip_model$evaluation_log %>%
